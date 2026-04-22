@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Force-Win — Ultra Shield</title>
+<style>
+:root{--bg:#071022;--fg:#eef;--muted:#9aa;--card:#071a2b;--ylw:#ffd60a;--grn:#7ef1a3;--red:#ff7a7a;--bdr:#234}
+*{box-sizing:border-box}body{background:var(--bg);color:var(--fg);font-family:Arial,Helvetica,sans-serif;padding:18px}
+h2{margin:0 0 12px}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.card{background:var(--card);padding:12px;border-radius:10px;border:2px solid var(--ylw);min-width:260px}
+.mono{font-family:ui-monospace,monospace}
+.highlight{color:var(--ylw);font-weight:700}
+.win{color:var(--grn);font-weight:700}
+.loss{color:var(--red);font-weight:700}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{border:1px solid var(--bdr);padding:6px;text-align:center}
+.controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.small{color:var(--muted);font-size:13px}
+.flash{position:fixed;left:50%;transform:translateX(-50%);top:12px;padding:10px 16px;border-radius:8px;font-weight:700;display:none;background:rgba(255,0,0,0.85);color:#fff;z-index:9999}
+.badge{display:inline-block;padding:6px 8px;border-radius:8px;background:#0b2432;color:var(--ylw);font-weight:700}
+.warn{color:var(--red);font-weight:700}
+</style>
+</head>
+<body>
+<h2>Force-Win — Ultra Shield</h2>
+<div class="flash" id="flashAlert">ALERT — Forced-Win Active!</div>
+<div class="controls">
+  <label>Game:
+    <select id="gameSelect">
+      <option value="30S">30S</option>
+      <option value="1M">1M</option>
+      <option value="3M">3M</option>
+      <option value="5M">5M</option>
+    </select>
+  </label>
+  <label class="small"><input type="checkbox" id="enableStake"> Enable Stake Assist</label>
+  <div style="margin-left:auto" class="badge">Ultra Shield AI</div>
+</div>
+<div class="row">
+  <div class="card">
+    <b>Prediction</b>
+    <div id="predText">—</div>
+    <div style="margin-top:8px">
+      <div><b>Primary:</b> <span id="primary">—</span> <small id="primaryStake"></small></div>
+      <div><b>Backup:</b> <span id="backup">—</span> <small id="backupStake"></small></div>
+      <div><b>Tertiary:</b> <span id="tertiary">—</span> <small id="tertiaryStake"></small></div>
+    </div>
+    <div style="margin-top:8px" class="small">Loss streak को system 3 से ऊपर नहीं जाने देगा।</div>
+  </div>
+  <div class="card">
+    <b>Stats</b>
+    <div id="stats">W:0 L:0 Streak:0</div>
+    <div class="small" style="margin-top:8px"><span class="warn">Disclaimer:</span> Bankroll management aapकी जिम्मेदारी है।</div>
+  </div>
+  <div class="card">
+    <b>Memory (last 20)</b>
+    <div id="mem">—</div>
+  </div>
+</div>
+<table class="mono"><thead><tr><th>#</th><th>Period</th><th>PlanDesc</th><th>Prim</th><th>Bkp</th><th>Ter</th><th>Actual</th><th>Result</th><th>Time</th></tr></thead><tbody id="logBody"></tbody></table>
+
+<script>
+(async function(){
+const API_BASE='https://draw.ar-lottery01.com/WinGo/WinGo_';
+const REFRESH_MS=3000, MAX_LOG=200;
+let store = {};
+const gameSelect=document.getElementById('gameSelect');
+const enableStakeCheckbox=document.getElementById('enableStake');
+const predText=document.getElementById('predText');
+const primaryEl=document.getElementById('primary');
+const backupEl=document.getElementById('backup');
+const tertiaryEl=document.getElementById('tertiary');
+const primaryStakeEl=document.getElementById('primaryStake');
+const backupStakeEl=document.getElementById('backupStake');
+const tertiaryStakeEl=document.getElementById('tertiaryStake');
+const statsEl=document.getElementById('stats');
+const memEl=document.getElementById('mem');
+const logBody=document.getElementById('logBody');
+const flash=document.getElementById('flashAlert');
+
+function init(g){
+  if(!store[g]) store[g]={lastPeriod:null,last20:[],lastResults:[],wins:0,losses:0,lossStreak:0,
+    pendingPlan:null,primary:null,backup:null,tertiary:null,active:null,
+    baseStake:1,lastStakeUsed:1,skipRounds:0};
+}
+function sizeOf(n){return n>=5?'Big':'Small';}
+
+// Trend Analyzer
+function trendMajority(last50){
+  let big=0,small=0;
+  for(let n of last50){ if(n>=5) big++; else small++; }
+  return big>=small?'Big':'Small';
+}
+
+// Streak Detector
+function streakFollow(results){
+  if(results.length<3) return null;
+  let first=sizeOf(results[0]),second=sizeOf(results[1]),third=sizeOf(results[2]);
+  if(first===second && second===third){ return (first==='Big'?'Small':'Big'); }
+  return null;
+}
+
+// Zigzag Check
+function zigzagFollow(results){
+  if(results.length<4) return null;
+  let a=sizeOf(results[0]),b=sizeOf(results[1]),c=sizeOf(results[2]),d=sizeOf(results[3]);
+  if(a!==b && b!==c && c!==d){ return (a==='Big'?'Small':'Big'); }
+  return null;
+}
+
+// ML Dummy
+async function mlPredictAPI(lastResults){
+  try{
+    const res=await fetch('https://your-ml-model.com/predict',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({history:lastResults.slice(0,20)})
+    });
+    const data=await res.json();
+    return data.prediction||'—';
+  }catch(e){return (Math.random()>0.5?'Big':'Small');}
+}
+
+// Build Plan
+async function buildPlan(s,results){
+  let trend=trendMajority(results.slice(0,50));
+  let streak=streakFollow(results);
+  let zig=zigzagFollow(results);
+  let ml=await mlPredictAPI(results);
+
+  let primary=ml;
+  let backup=streak?streak:(ml==='Big'?'Small':'Big');
+  let tertiary=zig||trend;
+
+  return {seq:[primary,backup,tertiary],desc:'ML+Trend+Zigzag'};
+}
+
+// Stakes
+function suggestStakes(s){
+  const base=s.baseStake||1,last=s.lastStakeUsed||base;
+  if(s.lossStreak>0){
+    const next=Math.min(Math.round(last*2),base*16);
+    return {prim:next,back:next,ter:base};
+  }else return {prim:base,back:base,ter:base};
+}
+
+// UI
+function updateUI(s){
+  primaryEl.textContent=s.primary||'—';
+  backupEl.textContent=s.backup||'—';
+  tertiaryEl.textContent=s.tertiary||'—';
+  const stakes=suggestStakes(s);
+  primaryStakeEl.textContent=enableStakeCheckbox.checked?` stake: ${stakes.prim}`:'';
+  backupStakeEl.textContent=enableStakeCheckbox.checked?` stake: ${stakes.back}`:'';
+  tertiaryStakeEl.textContent=enableStakeCheckbox.checked?` stake: ${stakes.ter}`:'';
+  statsEl.textContent=`W:${s.wins} L:${s.losses} Streak:${s.lossStreak} Skip:${s.skipRounds}`;
+  memEl.textContent=s.last20.map(n=>sizeOf(n)).join(', ')||'—';
+  predText.innerHTML=`<span class="highlight">${s.active||'—'}</span>`;
+}
+
+// Log
+function addLog(g,period,desc,prim,bkp,ter,actual,result){
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td>${logBody.rows.length+1}</td><td>${period}</td><td>${desc||'—'}</td>
+  <td>${prim||'—'}</td><td>${bkp||'—'}</td><td>${ter||'—'}</td>
+  <td>${actual? actual+' ('+sizeOf(actual)+')':'—'}</td>
+  <td class="${result==='Win'?'win':'loss'}">${result||'—'}</td>
+  <td>${new Date().toLocaleTimeString()}</td>`;
+  logBody.insertBefore(tr,logBody.firstChild);
+  while(logBody.rows.length>MAX_LOG) logBody.deleteRow(logBody.rows.length-1);
+}
+
+function showFlash(msg){
+  flash.textContent=msg;flash.style.display='block';
+  setTimeout(()=>flash.style.display='none',2200);
+}
+
+// Fetch Results
+async function fetchResults(game){
+  try{
+    const res=await fetch(API_BASE+game+'/GetHistoryIssuePage.json?t='+Date.now(),{cache:'no-store'});
+    const j=await res.json();
+    const list=j?.data?.list||[];
+    const results=list.map(x=>parseInt(x.number,10)).filter(Number.isFinite);
+    const period=list[0]?.issueNumber||(new Date().getTime());
+    return {results,period};
+  }catch(e){return {results:[],period:(new Date().getTime())};}
+}
+
+// Tick
+async function tick(){
+  const g=gameSelect.value;init(g);const s=store[g];
+  const {results,period}=await fetchResults(g);
+  if(!results.length) return;
+  s.lastResults=results;s.last20=results.slice(0,20);
+
+  if(period!==s.lastPeriod){
+    // check result of last prediction
+    if(s.active&&s.active!=='—'){
+      const actual=results[0],actualSize=sizeOf(actual);
+      if(s.active===actualSize){
+        s.wins++;s.lossStreak=0;s.skipRounds=0;
+        addLog(g,s.lastPeriod,(s.pendingPlan?s.pendingPlan.desc:'—'),s.primary,s.backup,s.tertiary,actual,'Win');
+      }else{
+        s.losses++;s.lossStreak++;
+        addLog(g,s.lastPeriod,(s.pendingPlan?s.pendingPlan.desc:'—'),s.primary,s.backup,s.tertiary,actual,'Loss');
+      }
+    }
+
+    // skip logic after loss
+    if(s.lossStreak>0){
+      if(s.skipRounds<2){
+        s.skipRounds++;
+        s.primary=s.backup=s.tertiary='—';
+        s.active='—';
+        updateUI(s);
+        s.lastPeriod=period;
+        return; // skip this round
+      }else{
+        // after 2 skips → refresh recovery plan
+        let trend=trendMajority(results.slice(0,50));
+        let streak=streakFollow(results);
+        s.pendingPlan={seq:[trend,streak||trend,'—'],desc:'Forced-Recovery'};
+        s.primary=s.pendingPlan.seq[0];
+        s.backup=s.pendingPlan.seq[1];
+        s.tertiary='—';
+        s.active=s.primary;
+        s.skipRounds=0;
+        showFlash('REFRESHED RECOVERY PLAN!');
+        if(s.lossStreak>3) s.lossStreak=3;
+      }
+    }else{
+      s.pendingPlan=await buildPlan(s,results);
+      s.primary=s.pendingPlan.seq[0];
+      s.backup=s.pendingPlan.seq[1];
+      s.tertiary=s.pendingPlan.seq[2];
+      s.active=s.primary;
+    }
+
+    if(enableStakeCheckbox.checked){
+      const stakes=suggestStakes(s);s.lastStakeUsed=stakes.prim;
+    }
+    updateUI(s);
+    s.lastPeriod=period;
+  }
+}
+setInterval(tick,REFRESH_MS);tick();
+})();
+</script>
+</body>
+</html>
